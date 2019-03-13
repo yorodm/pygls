@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning][semver].
 
 ### Changed
 
+- Fix initialization failure when no workspace is open
+
+## [0.7.3] - 01/30/2019
+
+### Added
+
+- Add _flake8_ and _bandit_ checks to _appveyor_ script
+
+### Changed
+
 - Start using [Keep a Changelog][keepachangelog] format.
+- Fix and refactor _initialize_ LSP method and add more tests
+- Fix _python 3.5_ compatibility
+- Use _python 3.5_ in _appveyor_ script
 
 ## 0.7.2 - 12/28/2018
 
@@ -65,3 +78,6 @@ and this project adheres to [Semantic Versioning][semver].
 
 [keepachangelog]: https://keepachangelog.com/en/1.0.0/
 [semver]: https://semver.org/spec/v2.0.0.html
+
+[Unreleased]: https://github.com/openlawlibrary/pygls/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/openlawlibrary/pygls/compare/v0.7.2...v0.7.3

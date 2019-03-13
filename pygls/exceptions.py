@@ -56,7 +56,7 @@ class JsonRpcException(Exception):
             'message': self.message,
         }
         if self.data is not None:
-            exception_dict['data'] = self.data
+            exception_dict['data'] = str(self.data)
         return exception_dict
 
 
@@ -106,7 +106,8 @@ class JsonRpcRequestCancelled(JsonRpcException):
 class JsonRpcServerError(JsonRpcException):
 
     def __init__(self, message, code, data=None):
-        assert _is_server_error_code(code)
+        if not _is_server_error_code(code):
+            raise ValueError('Error code should be in range -32099 - -32000')
         super().__init__(
             message=message, code=code, data=data)
 
