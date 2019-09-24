@@ -7,9 +7,50 @@ and this project adheres to [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+## [0.8.1] - 09/05/2019
+
 ### Changed
 
-- Fix initialization failure when no workspace is open
+- Fix parsing of partial messages and those with Content-Length keyword ([#80])
+- Fix Full SyncKind for servers accepting Incremental SyncKind ([#78])
+
+[#80]: https://github.com/openlawlibrary/pygls/pull/80
+[#78]: https://github.com/openlawlibrary/pygls/pull/78
+
+## [0.8.0] - 05/13/2019
+
+### Added
+
+- Add new types and features from LSP v3.14.0 ([#67])
+- Add API to dynamically register/unregister client capability ([#67])
+- Full text document synchronization support ([#65])
+- Add more tests for `deserialize_message` function ([#61])
+
+### Changed
+
+- Response object should contain result OR error field ([#64])
+- Fix handling parameters whose names are reserved by Python ([#56])
+
+[#67]: https://github.com/openlawlibrary/pygls/pull/67
+[#65]: https://github.com/openlawlibrary/pygls/pull/65
+[#64]: https://github.com/openlawlibrary/pygls/pull/64
+[#61]: https://github.com/openlawlibrary/pygls/pull/61
+[#56]: https://github.com/openlawlibrary/pygls/pull/56
+
+## [0.7.4] - 03/21/2019
+
+### Added
+
+- Add Pull Request template ([#54])
+
+### Changed
+
+- Update dependencies ([#53])
+- Fix initialization failure when no workspace is open ([#51])
+
+[#54]: https://github.com/openlawlibrary/pygls/pull/54
+[#53]: https://github.com/openlawlibrary/pygls/pull/53
+[#51]: https://github.com/openlawlibrary/pygls/pull/51
 
 ## [0.7.3] - 01/30/2019
 
@@ -79,5 +120,8 @@ and this project adheres to [Semantic Versioning][semver].
 [keepachangelog]: https://keepachangelog.com/en/1.0.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/openlawlibrary/pygls/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/openlawlibrary/pygls/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/openlawlibrary/pygls/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/openlawlibrary/pygls/compare/v0.7.4...v0.8.0
+[0.7.4]: https://github.com/openlawlibrary/pygls/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/openlawlibrary/pygls/compare/v0.7.2...v0.7.3

@@ -28,25 +28,9 @@ from functools import partial
 from itertools import zip_longest
 from typing import List
 
-from .exceptions import (JsonRpcException, JsonRpcInternalError,
-                         JsonRpcMethodNotFound, JsonRpcRequestCancelled)
+from .exceptions import (JsonRpcException, JsonRpcInternalError, JsonRpcMethodNotFound,
+                         JsonRpcRequestCancelled)
 from .feature_manager import FeatureManager, is_thread_function
-from .features import (EXIT, TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS,
-                       WINDOW_LOG_MESSAGE, WINDOW_SHOW_MESSAGE,
-                       WORKSPACE_APPLY_EDIT, WORKSPACE_CONFIGURATION,
-                       WORKSPACE_EXECUTE_COMMAND)
-from .types import (ApplyWorkspaceEditParams, ApplyWorkspaceEditResponse,
-                    Diagnostic, DidChangeTextDocumentParams,
-                    DidChangeWorkspaceFoldersParams,
-                    DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-                    ExecuteCommandParams, InitializeParams, InitializeResult,
-                    LogMessageParams, MessageType, PublishDiagnosticsParams,
-                    ServerCapabilities, ShowMessageParams, WorkspaceEdit)
-from .uris import from_fs_path, to_fs_path
-from .workspace import Workspace
-
-logger = logging.getLogger(__name__)
-
 
 def call_user_feature(base_func, method_name):
     """Wraps generic LSP features and calls user registered feature
@@ -57,7 +41,6 @@ def call_user_feature(base_func, method_name):
         ret_val = base_func(self, *args, **kwargs)
 
         try:
-            user_func = self.fm.features[method_name]
             self._execute_notification(user_func, *args, **kwargs)
         except KeyError:
             pass
@@ -82,8 +65,7 @@ def deserialize_message(data):
         else:
             return JsonRPCNotification(**data)
 
-    return namedtuple('Object',
-                      data.keys())(*data.values())
+    return namedtuple('Object', data.keys(), rename=True)(*data.values())
 
 
 def to_lsp_name(method_name):
@@ -157,6 +139,13 @@ class JsonRPCResponseMessage:
         self.result = result
         self.error = error
 
+    def without_none_fields(self):
+        if self.error is None:
+            del self.error
+        else:
+            del self.result
+        return self
+
 
 class JsonRPCProtocol(asyncio.Protocol):
     """Json RPC protocol implementation using on top of `asyncio.Protocol`.
@@ -166,12 +155,20 @@ class JsonRPCProtocol(asyncio.Protocol):
 
     This class provides bidirectional communication which is needed for LSP.
     """
-    BODY_PATTERN = re.compile(rb'\{.+?\}.*')
 
     CANCEL_REQUEST = '$/cancelRequest'
 
     CHARSET = 'utf-8'
     CONTENT_TYPE = 'application/vscode-jsonrpc'
+
+    MESSAGE_PATTERN = re.compile(
+        rb'^(?:[^\r\n]+\r\n)*' +
+        rb'Content-Length: (?P<length>\d+)\r\n' +
+        rb'(?:[^\r\n]+\r\n)*\r\n' +
+        rb'(?P<body>{.*)',
+        re.DOTALL,
+    )
+
     VERSION = '2.0'
 
     def __init__(self, server):
@@ -184,6 +181,7 @@ class JsonRPCProtocol(asyncio.Protocol):
 
         self.fm = FeatureManager(server)
         self.transport = None
+        self._message_buf = []
 
     def __call__(self):
         return self
@@ -387,7 +385,7 @@ class JsonRPCProtocol(asyncio.Protocol):
                                           JsonRPCProtocol.VERSION,
                                           result,
                                           error)
-        self._send_data(response)
+        self._send_data(response.without_none_fields())
 
     def connection_made(self, transport: asyncio.Transport):
         """Method from base class, called when connection is established"""
@@ -397,14 +395,31 @@ class JsonRPCProtocol(asyncio.Protocol):
         """Method from base class, called when server receives the data"""
         logger.debug('Received {}'.format(data))
 
-        for part in data.split(b'Content-Length'):
-            try:
-                body = JsonRPCProtocol.BODY_PATTERN.findall(part)[0]
-                self._procedure_handler(
-                    json.loads(body.decode(self.CHARSET),
-                               object_hook=deserialize_message))
-            except IndexError:
-                pass
+        while len(data):
+            # Append the incoming chunk to the message buffer
+            self._message_buf.append(data)
+
+            # Look for the body of the message
+            message = b''.join(self._message_buf)
+            found = JsonRPCProtocol.MESSAGE_PATTERN.fullmatch(message)
+
+            body = found.group('body') if found else b''
+            length = int(found.group('length')) if found else 1
+
+            if len(body) < length:
+                # Message is incomplete; bail until more data arrives
+                return
+
+            # Message is complete;
+            # extract the body and any remaining data,
+            # and reset the buffer for the next message
+            body, data = body[:length], body[length:]
+            self._message_buf = []
+
+            # Parse the body
+            self._procedure_handler(
+                json.loads(body.decode(self.CHARSET),
+                           object_hook=deserialize_message))
 
     def notify(self, method: str, params=None):
         """Sends a JSON RPC notification to the client."""
@@ -418,7 +433,7 @@ class JsonRPCProtocol(asyncio.Protocol):
 
         self._send_data(request)
 
-    def send_request(self, method, params=None):
+    def send_request(self, method, params=None, callback=None):
         """Sends a JSON RPC request to the client.
 
         Args:
@@ -440,11 +455,32 @@ class JsonRPCProtocol(asyncio.Protocol):
         )
 
         future = Future()
+        # If callback function is given, call it when result is received
+        if callback:
+            def wrapper(future: Future):
+                result = future.result()
+                logger.info('Configuration for {} received: {}'
+                            .format(params, result))
+                callback(result)
+            future.add_done_callback(wrapper)
 
         self._server_request_futures[msg_id] = future
         self._send_data(request)
 
         return future
+
+    def send_request_async(self, method, params=None):
+        """Calls `send_request` and wraps `concurrent.futures.Future` with
+        `asyncio.Future` so it can be used with `await` keyword.
+
+        Args:
+            method(str): The method name of the message to send
+            params(any): The payload of the message
+
+        Returns:
+            `asyncio.Future` that can be awaited
+        """
+        return asyncio.wrap_future(self.send_request(method, params))
 
     def thread(self):
         """Decorator that mark function to execute it in a thread."""
@@ -518,6 +554,7 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
         server_capabilities = ServerCapabilities(self.fm.features.keys(),
                                                  self.fm.feature_options,
                                                  self.fm.commands,
+                                                 self._server.sync_kind,
                                                  client_capabilities)
         logger.debug('Server capabilities: {}'
                      .format(server_capabilities.__dict__))
@@ -527,7 +564,7 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
 
         # Initialize the workspace
         workspace_folders = getattr(params, 'workspaceFolders', [])
-        self.workspace = Workspace(root_uri, workspace_folders)
+        self.workspace = Workspace(root_uri, self._server.sync_kind, workspace_folders)
 
         return InitializeResult(server_capabilities)
 
@@ -586,7 +623,7 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
         cmd_handler = self.fm.commands[params.command]
         self._execute_request(msg_id, cmd_handler, params.arguments)
 
-    def get_configuration(self, params, callback=None):
+    def get_configuration(self, params, callback):
         """Sends configuration request to the client.
 
         Args:
@@ -597,17 +634,7 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
             concurrent.futures.Future object that will be resolved once a
             response has been received
         """
-        if callback:
-            def configuration(future: Future):
-                result = future.result()
-                logger.info('Configuration for {} received: {}'
-                            .format(params, result))
-                return callback(result)
-
-            request_future = self.send_request(WORKSPACE_CONFIGURATION, params)
-            request_future.add_done_callback(configuration)
-        else:
-            return self.send_request(WORKSPACE_CONFIGURATION, params)
+        return self.send_request(WORKSPACE_CONFIGURATION, params, callback)
 
     def get_configuration_async(self, params):
         """Calls `get_configuration` method but designed to use with coroutines
@@ -617,12 +644,38 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
         Returns:
             asyncio.Future that can be awaited
         """
-        return asyncio.wrap_future(self.get_configuration(params))
+        return asyncio.wrap_future(self.get_configuration(params, None))
 
     def publish_diagnostics(self, doc_uri: str, diagnostics: List[Diagnostic]):
         """Sends diagnostic notification to the client."""
         self.notify(TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS,
                     PublishDiagnosticsParams(doc_uri, diagnostics))
+
+    def register_capability(self, params: RegistrationParams, callback):
+        """Register a new capability on the client.
+
+        Args:
+            params(RegistrationParams): RegistrationParams from lsp specs
+            callback(callable): Callabe which will be called after
+                                response from the client is received
+        Returns:
+            concurrent.futures.Future object that will be resolved once a
+            response has been received
+        """
+        return self.send_request(CLIENT_REGISTER_CAPABILITY, params, callback)
+
+    def register_capability_async(self, params: RegistrationParams):
+        """Register a new capability on the client.
+
+        Args:
+            params(RegistrationParams): RegistrationParams from lsp specs
+            callback(callable): Callabe which will be called after
+                                response from the client is received
+        Returns:
+            asyncio.Future object that will be resolved once a
+            response has been received
+        """
+        return asyncio.wrap_future(self.register_capability(params, None))
 
     def show_message(self, message, msg_type=MessageType.Info):
         """Sends message to the client to display message."""
@@ -631,3 +684,29 @@ class LanguageServerProtocol(JsonRPCProtocol, metaclass=LSPMeta):
     def show_message_log(self, message, msg_type=MessageType.Log):
         """Sends message to the client's output channel."""
         self.notify(WINDOW_LOG_MESSAGE, LogMessageParams(msg_type, message))
+
+    def unregister_capability(self, params: UnregistrationParams, callback):
+        """Unregister a new capability on the client.
+
+        Args:
+            params(UnregistrationParams): UnregistrationParams from lsp specs
+            callback(callable): Callabe which will be called after
+                                response from the client is received
+        Returns:
+            concurrent.futures.Future object that will be resolved once a
+            response has been received
+        """
+        return self.send_request(CLIENT_UNREGISTER_CAPABILITY, params, callback)
+
+    def unregister_capability_async(self, params: UnregistrationParams):
+        """Unregister a new capability on the client.
+
+        Args:
+            params(UnregistrationParams): UnregistrationParams from lsp specs
+            callback(callable): Callabe which will be called after
+                                response from the client is received
+        Returns:
+            asyncio.Future object that will be resolved once a
+            response has been received
+        """
+        return asyncio.wrap_future(self.unregister_capability(params, None))

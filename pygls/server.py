@@ -16,15 +16,16 @@
 ############################################################################
 import asyncio
 import logging
+import re
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.pool import ThreadPool
-from re import findall
 from threading import Event
 from typing import Callable, Dict, List
 
-from pygls.types import (ApplyWorkspaceEditResponse, ConfigCallbackType,
-                         Diagnostic, MessageType, WorkspaceEdit)
+from pygls.types import (ApplyWorkspaceEditResponse, ConfigCallbackType, Diagnostic, MessageType,
+                         RegistrationParams, TextDocumentSyncKind, UnregistrationParams,
+                         WorkspaceEdit)
 
 from . import IS_WIN
 from .protocol import LanguageServerProtocol
@@ -36,33 +37,38 @@ logger = logging.getLogger(__name__)
 
 async def aio_readline(loop, executor, stop_event, rfile, proxy):
     """Reads data from stdin in separate thread (asynchronously)."""
+
+    CONTENT_LENGTH_PATTERN = re.compile(rb'^Content-Length: (\d+)\r\n$')
+
+    # Initialize message buffer
+    message = []
+    content_length = 0
+
     while not stop_event.is_set():
-        # Read line
-        line = await loop.run_in_executor(executor, rfile.readline)
+        # Read a header line
+        header = await loop.run_in_executor(executor, rfile.readline)
+        message.append(header)
 
-        if not line:
-            continue
+        # Extract content length if possible
+        if not content_length:
+            match = CONTENT_LENGTH_PATTERN.fullmatch(header)
+            if match:
+                content_length = int(match.group(1))
+                logger.debug('Content length: {}'.format(content_length))
 
-        # Extract content length from line
-        try:
-            content_length = int(findall(rb'\b\d+\b', line)[0])
-            logger.debug('Content length: {}'.format(content_length))
-        except IndexError:
-            continue
+        # Check if all headers have been read (as indicated by an empty line \r\n)
+        if content_length and not header.strip():
 
-        # Throw away empty lines
-        while line and line.strip():
-            line = await loop.run_in_executor(executor, rfile.readline)
+            # Read body
+            body = await loop.run_in_executor(executor, rfile.read, content_length)
+            message.append(body)
 
-        if not line:
-            continue
+            # Pass message to language server protocol
+            proxy(b''.join(message))
 
-        # Read body
-        body = await loop.run_in_executor(executor, rfile.read, content_length)
-
-        # Pass body to language server protocol
-        if body:
-            proxy(body)
+            # Reset the buffer
+            message = []
+            content_length = 0
 
 
 class StdOutTransportAdapter:
@@ -90,8 +96,13 @@ class Server:
     Args:
         protocol_cls(Protocol): Protocol implementation that must be derived
                                 from `asyncio.Protocol`
+        loop(AbstractEventLoop): asyncio event loop
         max_workers(int, optional): Number of workers for `ThreadPool` and
                                     `ThreadPoolExecutor`
+        sync_kind(TextDocumentSyncKind): Text document synchronization option
+            - NONE(0): no synchronization
+            - FULL(1): replace whole text
+            - INCREMENTAL(2): replace text within a given range
 
     Attributes:
         _max_workers(int): Number of workers for thread pool executor
@@ -104,7 +115,8 @@ class Server:
                                                     - lazy instantiated
     """
 
-    def __init__(self, protocol_cls, loop=None, max_workers=2):
+    def __init__(self, protocol_cls, loop=None, max_workers=2,
+                 sync_kind=TextDocumentSyncKind.INCREMENTAL):
         if not issubclass(protocol_cls, asyncio.Protocol):
             raise TypeError('Protocol class should be subclass of asyncio.Protocol')
 
@@ -113,6 +125,7 @@ class Server:
         self._stop_event = None
         self._thread_pool = None
         self._thread_pool_executor = None
+        self.sync_kind = sync_kind
 
         if IS_WIN:
             asyncio.set_event_loop(asyncio.ProactorEventLoop())
@@ -247,12 +260,20 @@ class LanguageServer(Server):
         return self.lsp.get_configuration(params, callback)
 
     def get_configuration_async(self, params: ConfigurationParams) -> asyncio.Future:
-        """Gets the configuration settings from the client."""
+        """Gets the configuration settings from the client. Should be called with `await`"""
         return self.lsp.get_configuration_async(params)
 
     def publish_diagnostics(self, doc_uri: str, diagnostics: List[Diagnostic]):
         """Sends diagnostic notification to the client."""
         self.lsp.publish_diagnostics(doc_uri, diagnostics)
+
+    def register_capability(self, params: RegistrationParams, callback):
+        """Register a new capability on the client."""
+        return self.lsp.register_capability(params, callback)
+
+    def register_capability_async(self, params: RegistrationParams):
+        """Register a new capability on the client. Should be called with `await`"""
+        return self.lsp.register_capability_async(params)
 
     def send_notification(self, method: str, params: object = None) -> None:
         """Sends notification to the client."""
@@ -269,6 +290,14 @@ class LanguageServer(Server):
     def thread(self) -> Callable:
         """Decorator that mark function to execute it in a thread."""
         return self.lsp.thread()
+
+    def unregister_capability(self, params: UnregistrationParams, callback):
+        """Unregister a new capability on the client."""
+        return self.lsp.unregister_capability(params, callback)
+
+    def unregister_capability_async(self, params: UnregistrationParams):
+        """Unregister a new capability on the client. Should be called with `await`"""
+        return self.lsp.unregister_capability_async(params)
 
     @property
     def workspace(self) -> Workspace:

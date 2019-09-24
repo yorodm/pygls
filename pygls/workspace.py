@@ -22,8 +22,8 @@ import os
 import re
 from typing import List
 
-from .types import (NumType, Position, TextDocumentContentChangeEvent,
-                    TextDocumentItem, WorkspaceFolder)
+from .types import (NumType, Position, TextDocumentContentChangeEvent, TextDocumentItem,
+                    TextDocumentSyncKind, WorkspaceFolder)
 from .uris import to_fs_path, uri_scheme
 
 # TODO: this is not the best e.g. we capture numbers
@@ -35,7 +35,8 @@ log = logging.getLogger(__name__)
 
 class Document(object):
 
-    def __init__(self, uri, source=None, version=None, local=True,):
+    def __init__(self, uri, source=None, version=None, local=True,
+                 sync_kind=TextDocumentSyncKind.INCREMENTAL):
         self.uri = uri
         self.version = version
         self.path = to_fs_path(uri)
@@ -44,18 +45,17 @@ class Document(object):
         self._local = local
         self._source = source
 
+        self._is_sync_kind_full = sync_kind == TextDocumentSyncKind.FULL
+        self._is_sync_kind_incremental = sync_kind == TextDocumentSyncKind.INCREMENTAL
+        self._is_sync_kind_none = sync_kind == TextDocumentSyncKind.NONE
+
     def __str__(self):
         return str(self.uri)
 
-    def apply_change(self, change: TextDocumentContentChangeEvent) -> None:
-        """Apply a change to the document."""
+    def _apply_incremental_change(self, change: TextDocumentContentChangeEvent) -> None:
+        """Apply an INCREMENTAL text change to the document"""
         text = change.text
         change_range = change.range
-
-        if not change_range:
-            # The whole file has changed
-            self._source = text
-            return
 
         start_line = change_range.start.line
         start_col = change_range.start.character
@@ -89,6 +89,62 @@ class Document(object):
                 new.write(line[end_col:])
 
         self._source = new.getvalue()
+
+    def _apply_full_change(self, change: TextDocumentContentChangeEvent) -> None:
+        """Apply a FULL text change to the document."""
+        self._source = change.text
+
+    def _apply_none_change(self, change: TextDocumentContentChangeEvent) -> None:
+        """Apply a NONE text change to the document
+
+        Currently does nothing, provided for consistency.
+        """
+
+    def apply_change(self, change: TextDocumentContentChangeEvent) -> None:
+        """Apply a text change to a document, considering TextDocumentSyncKind
+
+        Performs either INCREMENTAL, FULL, or NONE synchronization based on
+        both the Client request and server capabilities.
+
+        INCREMENTAL versus FULL synchronization:
+            Even if a server accepts INCREMENTAL SyncKinds, clients may request
+            a FULL SyncKind. In LSP 3.x, clients make this request by omitting
+            both Range and RangeLength from their request. Consequently, the
+            attributes "range" and "rangeLength" will be missing from FULL
+            content update client requests in the pygls Python library.
+
+        Improvements:
+            Consider revising our treatment of TextDocumentContentChangeEvent,
+            and all other LSP primitive types, to set "Optional" interface
+            attributes from the client to "None". The "hasattr" check is
+            admittedly quite ugly; while it is appropriate given our current
+            state, there are plenty of improvements to be made. A good place to
+            start: require more rigorous de-serialization efforts when reading
+            client requests in protocol.py.
+        """
+        if (
+            hasattr(change, 'range') and
+            hasattr(change, 'rangeLength') and
+            self._is_sync_kind_incremental
+        ):
+            self._apply_incremental_change(change)
+        elif self._is_sync_kind_none:
+            self._apply_none_change(change)
+        elif not (
+            hasattr(change, 'range') or
+            hasattr(change, 'rangeLength')
+        ):
+            self._apply_full_change(change)
+        else:
+            # Log an error, but still perform full update to preserve existing
+            # assumptions in test_document/test_document_full_edit. Test breaks
+            # otherwise, and fixing the tests would require a broader fix to
+            # protocol.py.
+            log.error(
+                "Unsupported client-provided TextDocumentContentChangeEvent. "
+                "Please update / submit a Pull Request to your LSP client."
+            )
+            self._apply_full_change(change)
 
     @property
     def lines(self) -> List[str]:
@@ -128,10 +184,11 @@ class Document(object):
 
 class Workspace(object):
 
-    def __init__(self, root_uri, workspace_folders=None):
+    def __init__(self, root_uri, sync_kind=None, workspace_folders=None):
         self._root_uri = root_uri
         self._root_uri_scheme = uri_scheme(self._root_uri)
         self._root_path = to_fs_path(self._root_uri)
+        self._sync_kind = sync_kind
         self._folders = {}
         self._docs = {}
 
@@ -143,7 +200,8 @@ class Workspace(object):
                          doc_uri: str,
                          source: str = None,
                          version: NumType = None) -> Document:
-        return Document(doc_uri, source=source, version=version)
+        return Document(doc_uri, source=source, version=version,
+                        sync_kind=self._sync_kind)
 
     def add_folder(self, folder: WorkspaceFolder):
         self._folders[folder.uri] = folder
